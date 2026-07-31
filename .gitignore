@@ -29,3 +29,6 @@ scripts/
 result
 result-*
 *.nix-tmp
+
+# Local session notes (not for version control)
+/lgl/
