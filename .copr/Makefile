@@ -1,0 +1,9 @@
+outdir = $(shell pwd)
+version = $(shell awk '/^Version:/ {print $$2}' packaging/vm-curator.spec)
+
+srpm:
+	git archive --prefix=vm-curator-$(version)/ HEAD \
+		-o $(outdir)/vm-curator-$(version).tar.gz
+	rpmbuild -bs packaging/vm-curator.spec \
+		--define "_sourcedir $(outdir)" \
+		--define "_srcrpmdir $(outdir)"
