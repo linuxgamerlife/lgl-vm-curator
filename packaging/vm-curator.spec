@@ -1,6 +1,6 @@
 Name:           vm-curator
 Version:        1.3.0
-Release:        3%{?dist}
+Release:        2%{?dist}
 Summary:        TUI application to manage QEMU/KVM virtual machines
 
 License:        MIT
@@ -53,14 +53,12 @@ echo "then log out and back in for it to take effect."
 echo ""
 
 %changelog
-* Fri Jul 31 2026 Linux Gamer Life <linuxgamerlife@users.noreply.github.com> - 1.3.0-3
-- Add explicit systemd-libs Requires (provides libudev)
-- Print a post-install reminder to enable BIOS virtualization and join
-  the kvm group
-
 * Fri Jul 31 2026 Linux Gamer Life <linuxgamerlife@users.noreply.github.com> - 1.3.0-2
 - Package desktop file and icon, add kitty as a runtime dependency,
   switch SRPM build to a git-archive-based Makefile (no git tag needed)
+- Add explicit systemd-libs Requires (provides libudev)
+- Print a post-install reminder to enable BIOS virtualization and join
+  the kvm group
 
 * Fri Jul 31 2026 Linux Gamer Life <linuxgamerlife@users.noreply.github.com> - 1.3.0-1
 - Initial COPR packaging
