@@ -13,6 +13,7 @@ BuildRequires:  systemd-devel
 BuildRequires:  desktop-file-utils
 Requires:       qemu-system-x86-core
 Requires:       qemu-img
+Requires:       systemd-libs
 Requires:       bash
 Requires:       kitty
 

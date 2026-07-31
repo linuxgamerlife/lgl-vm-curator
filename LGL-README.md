@@ -30,6 +30,19 @@ sudo dnf copr enable linuxgamerlife/lgl-vm-curator
 sudo dnf install vm-curator
 ```
 
+QEMU, qemu-img, and libudev are pulled in automatically as package dependencies.
+
+### Before you start
+
+- **Enable virtualization in your BIOS/UEFI** — Intel VT-x or AMD-V must be turned on, or KVM acceleration won't be available and VMs will fail to start or run unusably slow.
+- **Add your user to the `kvm` group** so `vm-curator` can access `/dev/kvm`:
+
+  ```bash
+  sudo usermod -aG kvm $USER
+  ```
+
+  Log out and back in for the group change to take effect.
+
 ---
 
 ## License
