@@ -19,6 +19,8 @@ This repo packages it for Fedora and Bazzite via COPR, so it's easy to install w
 
 All credit for vm-curator itself goes to [Mark Roboff](https://github.com/mroboff) — see the [upstream README](https://github.com/mroboff/vm-curator#readme) for full feature docs and usage.
 
+See [LGL-CHANGELOG.md](LGL-CHANGELOG.md) for what's changed in this packaging.
+
 ---
 
 ## Install

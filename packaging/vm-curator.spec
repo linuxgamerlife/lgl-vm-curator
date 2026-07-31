@@ -1,6 +1,6 @@
 Name:           vm-curator
 Version:        1.3.0
-Release:        2%{?dist}
+Release:        3%{?dist}
 Summary:        TUI application to manage QEMU/KVM virtual machines
 
 License:        MIT
@@ -44,7 +44,20 @@ desktop-file-validate %{buildroot}%{_datadir}/applications/lgl-vm-curator.deskto
 %{_datadir}/applications/lgl-vm-curator.desktop
 %{_datadir}/pixmaps/lgl-vm-curator.png
 
+%post
+echo ""
+echo "vm-curator: make sure hardware virtualization (Intel VT-x / AMD-V) is enabled"
+echo "in your BIOS/UEFI, and that your user is in the 'kvm' group:"
+echo "  sudo usermod -aG kvm \$USER"
+echo "then log out and back in for it to take effect."
+echo ""
+
 %changelog
+* Fri Jul 31 2026 Linux Gamer Life <linuxgamerlife@users.noreply.github.com> - 1.3.0-3
+- Add explicit systemd-libs Requires (provides libudev)
+- Print a post-install reminder to enable BIOS virtualization and join
+  the kvm group
+
 * Fri Jul 31 2026 Linux Gamer Life <linuxgamerlife@users.noreply.github.com> - 1.3.0-2
 - Package desktop file and icon, add kitty as a runtime dependency,
   switch SRPM build to a git-archive-based Makefile (no git tag needed)
