@@ -9,7 +9,7 @@ This tracks packaging-only changes for the Fedora/Bazzite COPR build. The applic
 - Packaged an application-menu entry: `packaging/lgl-vm-curator.desktop` and `packaging/lgl-vm-curator.png`, installed to `/usr/share/applications/` and `/usr/share/pixmaps/`.
 - Added `Requires: kitty`, since the desktop entry launches vm-curator inside it (`Exec=kitty -e lgl-vm-curator`).
 - Added a `desktop-file-validate` build-time check so a malformed desktop entry fails the build instead of shipping broken.
-- Moved the spec file to `packaging/vm-curator.spec`.
+- Moved the spec file to `packaging/vm-curator.spec`, later renamed to `packaging/lgl-vm-curator.spec`.
 - Switched the SRPM build method from `rpkg` to a git-archive-based `.copr/Makefile`. `rpkg` tied the source archive to the `v1.3.0` git tag, which meant packaging-only changes couldn't be built without either reusing a stale tag or re-tagging a non-upstream change. The Makefile archives `HEAD` directly, so the tag stays a pure marker of the real upstream release.
 - Installed `git` inside the `make_srpm` mock chroot, since that minimal build environment doesn't include it by default and the Makefile's `git archive` step needs it.
 - Fixed a personal email address leaked into the RPM `%changelog`, replacing it with a GitHub noreply address.

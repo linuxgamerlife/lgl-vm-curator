@@ -60,6 +60,7 @@ echo ""
 - Print a post-install reminder to enable BIOS virtualization and join
   the kvm group
 - Install the binary as lgl-vm-curator instead of vm-curator
+- Rename the spec file to lgl-vm-curator.spec
 
 * Fri Jul 31 2026 Linux Gamer Life <linuxgamerlife@users.noreply.github.com> - 1.3.0-1
 - Initial COPR packaging
