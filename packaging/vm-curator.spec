@@ -30,7 +30,7 @@ graphics acceleration.
 cargo build --release --locked
 
 %install
-install -Dm755 target/release/%{name} %{buildroot}%{_bindir}/%{name}
+install -Dm755 target/release/%{name} %{buildroot}%{_bindir}/lgl-vm-curator
 install -Dm644 README.md %{buildroot}%{_pkgdocdir}/README.md
 install -Dm644 LICENSE %{buildroot}%{_licensedir}/%{name}/LICENSE
 install -Dm644 packaging/lgl-vm-curator.desktop %{buildroot}%{_datadir}/applications/lgl-vm-curator.desktop
@@ -38,7 +38,7 @@ install -Dm644 packaging/lgl-vm-curator.png %{buildroot}%{_datadir}/pixmaps/lgl-
 desktop-file-validate %{buildroot}%{_datadir}/applications/lgl-vm-curator.desktop
 
 %files
-%{_bindir}/%{name}
+%{_bindir}/lgl-vm-curator
 %{_pkgdocdir}/README.md
 %license LICENSE
 %{_datadir}/applications/lgl-vm-curator.desktop
@@ -46,7 +46,7 @@ desktop-file-validate %{buildroot}%{_datadir}/applications/lgl-vm-curator.deskto
 
 %post
 echo ""
-echo "vm-curator: make sure hardware virtualization (Intel VT-x / AMD-V) is enabled"
+echo "lgl-vm-curator: make sure hardware virtualization (Intel VT-x / AMD-V) is enabled"
 echo "in your BIOS/UEFI, and that your user is in the 'kvm' group:"
 echo "  sudo usermod -aG kvm \$USER"
 echo "then log out and back in for it to take effect."
@@ -59,6 +59,7 @@ echo ""
 - Add explicit systemd-libs Requires (provides libudev)
 - Print a post-install reminder to enable BIOS virtualization and join
   the kvm group
+- Install the binary as lgl-vm-curator instead of vm-curator
 
 * Fri Jul 31 2026 Linux Gamer Life <linuxgamerlife@users.noreply.github.com> - 1.3.0-1
 - Initial COPR packaging

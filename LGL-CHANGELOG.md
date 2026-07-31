@@ -7,7 +7,7 @@ This tracks packaging-only changes for the Fedora/Bazzite COPR build. The applic
 (`1.3.0-1` never built successfully via `rpkg` — see below — so this is the first release that actually publishes.)
 
 - Packaged an application-menu entry: `packaging/lgl-vm-curator.desktop` and `packaging/lgl-vm-curator.png`, installed to `/usr/share/applications/` and `/usr/share/pixmaps/`.
-- Added `Requires: kitty`, since the desktop entry launches vm-curator inside it (`Exec=kitty -e vm-curator`).
+- Added `Requires: kitty`, since the desktop entry launches vm-curator inside it (`Exec=kitty -e lgl-vm-curator`).
 - Added a `desktop-file-validate` build-time check so a malformed desktop entry fails the build instead of shipping broken.
 - Moved the spec file to `packaging/vm-curator.spec`.
 - Switched the SRPM build method from `rpkg` to a git-archive-based `.copr/Makefile`. `rpkg` tied the source archive to the `v1.3.0` git tag, which meant packaging-only changes couldn't be built without either reusing a stale tag or re-tagging a non-upstream change. The Makefile archives `HEAD` directly, so the tag stays a pure marker of the real upstream release.
@@ -15,6 +15,7 @@ This tracks packaging-only changes for the Fedora/Bazzite COPR build. The applic
 - Fixed a personal email address leaked into the RPM `%changelog`, replacing it with a GitHub noreply address.
 - Added an explicit `Requires: systemd-libs` (provides `libudev`) for clarity, alongside RPM's auto-detected shared-library dependency.
 - Added a `%post` install reminder to enable hardware virtualization (Intel VT-x / AMD-V) in the BIOS/UEFI and to join the `kvm` group (`sudo usermod -aG kvm $USER`) — without this, `/dev/kvm` exists but isn't accessible, and VMs fail at QEMU startup with a permission error.
+- Installed the binary as `lgl-vm-curator` instead of `vm-curator`.
 
 ## v1.3.0-1
 
