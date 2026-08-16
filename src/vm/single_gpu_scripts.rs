@@ -740,7 +740,7 @@ fn generate_variable_definitions(vm: &DiscoveredVm, components: &LaunchScriptCom
     // Add disk variable
     if let Some(ref disk_var) = components.disk_var {
         vars.push(disk_var.clone());
-    } else if let Some(disk) = vm.config.disks.first() {
+    } else if let Some(disk) = vm.config.primary_disk() {
         vars.push(format!("DISK=\"{}\"", disk.path.display()));
     }
 
@@ -1533,7 +1533,7 @@ fn generate_basic_qemu_command(
     }
 
     // Add disk
-    if let Some(disk) = vm.config.disks.first() {
+    if let Some(disk) = vm.config.primary_disk() {
         let format_str = match &disk.format {
             crate::vm::qemu_config::DiskFormat::Qcow2 => "qcow2",
             crate::vm::qemu_config::DiskFormat::Raw => "raw",
