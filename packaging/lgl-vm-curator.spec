@@ -1,6 +1,6 @@
 Name:           vm-curator
-Version:        1.3.0
-Release:        2%{?dist}
+Version:        1.4.0
+Release:        1%{?dist}
 Summary:        TUI application to manage QEMU/KVM virtual machines
 
 License:        MIT
@@ -53,6 +53,12 @@ echo "then log out and back in for it to take effect."
 echo ""
 
 %changelog
+* Sun Aug 16 2026 Linux Gamer Life <linuxgamerlife@users.noreply.github.com> - 1.4.0-1
+- Update to upstream v1.4.0: Virtual Network Manager (managed NAT/Isolated
+  networks), physical disk (NVMe/HDD/USB) passthrough as boot device, and a
+  fix for relative library paths so launching works correctly
+- No packaging changes; spec/Makefile/desktop/icon unchanged from 1.3.0-2
+
 * Fri Jul 31 2026 Linux Gamer Life <linuxgamerlife@users.noreply.github.com> - 1.3.0-2
 - Package desktop file and icon, add kitty as a runtime dependency,
   switch SRPM build to a git-archive-based Makefile (no git tag needed)

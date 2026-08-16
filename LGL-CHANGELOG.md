@@ -1,6 +1,11 @@
 # LGL VM Curator — Packaging Changelog
 
-This tracks packaging-only changes for the Fedora/Bazzite COPR build. The application itself is unchanged from [upstream vm-curator v1.3.0](https://github.com/mroboff/vm-curator/blob/main/CHANGELOG.md) — see that changelog for feature history.
+This tracks packaging-only changes for the Fedora/Bazzite COPR build. The application itself is unchanged from [upstream vm-curator v1.4.0](https://github.com/mroboff/vm-curator/blob/main/CHANGELOG.md) — see that changelog for feature history.
+
+## v1.4.0-1
+
+- Merged upstream `v1.3.0` → `v1.4.0` (Virtual Network Manager, physical disk passthrough as boot device, launch path fix) into this fork's `main`.
+- No packaging changes — spec, `.copr/Makefile`, desktop entry, and icon are unchanged from `1.3.0-2`. Only the `Version`/`Release` fields and `%changelog` were bumped to match upstream.
 
 ## v1.3.0-2
 
