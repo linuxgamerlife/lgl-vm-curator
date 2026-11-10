@@ -1,4 +1,4 @@
-Name:           vm-curator
+Name:           lgl-vm-curator
 Version:        1.5.0
 Release:        1%{?dist}
 Summary:        TUI application to manage QEMU/KVM virtual machines
@@ -31,11 +31,11 @@ Suggests:       qemu-system-ppc
 Suggests:       qemu-system-m68k
 
 %description
-vm-curator is a feature-rich TUI application for managing QEMU/KVM virtual
-machines: automatic VM discovery, a 5-step creation wizard with 130+
-pre-configured OS profiles, snapshot management, USB and physical disk
-passthrough, GPU passthrough, managed virtual networks, shared folders, and 3D
-graphics acceleration.
+lgl-vm-curator is the LinuxGamerLife packaging of vm-curator, a feature-rich
+TUI application for managing QEMU/KVM virtual machines: automatic VM
+discovery, a 5-step creation wizard with 130+ pre-configured OS profiles,
+snapshot management, USB and physical disk passthrough, GPU passthrough,
+managed virtual networks, shared folders, and 3D graphics acceleration.
 
 %prep
 %autosetup
@@ -44,7 +44,7 @@ graphics acceleration.
 cargo build --release --locked
 
 %install
-install -Dm755 target/release/%{name} %{buildroot}%{_bindir}/lgl-vm-curator
+install -Dm755 target/release/vm-curator %{buildroot}%{_bindir}/lgl-vm-curator
 install -Dm644 README.md %{buildroot}%{_pkgdocdir}/README.md
 install -Dm644 UPSTREAM-README.md %{buildroot}%{_pkgdocdir}/UPSTREAM-README.md
 install -Dm644 LICENSE %{buildroot}%{_licensedir}/%{name}/LICENSE
@@ -82,6 +82,10 @@ echo ""
   QEMU system emulators
 - Ship UPSTREAM-README.md (upstream docs pinned to v1.5.0) alongside README
 - Refresh the package description for the new feature set
+- Rename the RPM package from vm-curator to lgl-vm-curator so it no longer
+  collides with upstream's official vm-curator RPM (both repos can now be
+  enabled and both packages installed side by side); existing vm-curator
+  users move over once with `sudo dnf swap vm-curator lgl-vm-curator`
 
 * Sun Aug 16 2026 Linux Gamer Life <linuxgamerlife@users.noreply.github.com> - 1.4.0-1
 - Update to upstream v1.4.0: Virtual Network Manager (managed NAT/Isolated
