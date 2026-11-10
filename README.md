@@ -13,11 +13,11 @@
 
 ## Overview
 
-[vm-curator](https://github.com/mroboff/vm-curator) is a fast, friendly Rust TUI for managing QEMU/KVM virtual machines — automatic VM discovery, a guided creation wizard, GPU passthrough, snapshots, and 120+ pre-configured OS profiles.
+[vm-curator](https://github.com/mroboff/vm-curator) is a fast, friendly Rust TUI for managing QEMU/KVM virtual machines — automatic VM discovery, a guided creation wizard, GPU and physical-disk passthrough, snapshots, disk resizing, and 130+ pre-configured OS profiles.
 
-This repo packages it for Fedora and Bazzite via COPR, so it's easy to install without a manual `cargo build`.
+This repo packages it for Fedora and Bazzite via COPR, so it's easy to install without a manual `cargo build`. It currently tracks upstream **v1.5.0**.
 
-All credit for vm-curator itself goes to [Mark Roboff](https://github.com/mroboff) — see the [upstream README](https://github.com/mroboff/vm-curator#readme) for full feature docs and usage.
+All credit for vm-curator itself goes to [Mark Roboff](https://github.com/mroboff) — see the [upstream README](https://github.com/mroboff/vm-curator#readme) for full feature docs and usage, or the pinned copy in [UPSTREAM-README.md](UPSTREAM-README.md).
 
 See [LGL-CHANGELOG.md](LGL-CHANGELOG.md) for what's changed in this packaging.
 
@@ -32,7 +32,7 @@ sudo dnf copr enable linuxgamerlife/lgl-vm-curator
 sudo dnf install vm-curator
 ```
 
-QEMU, qemu-img, and libudev are pulled in automatically as package dependencies.
+QEMU (`qemu-system-x86`, so the GTK/SDL/SPICE display and audio modules come with it), qemu-img, and libudev are pulled in automatically as package dependencies. UEFI firmware, swtpm, passt, samba, and virt-viewer are weak dependencies, which `dnf` installs by default unless you've disabled weak deps.
 
 ### Before you start
 

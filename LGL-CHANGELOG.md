@@ -1,6 +1,15 @@
 # LGL VM Curator — Packaging Changelog
 
-This tracks packaging-only changes for the Fedora/Bazzite COPR build. The application itself is unchanged from [upstream vm-curator v1.4.0](https://github.com/mroboff/vm-curator/blob/main/CHANGELOG.md) — see that changelog for feature history.
+This tracks packaging-only changes for the Fedora/Bazzite COPR build. The application itself is unchanged from [upstream vm-curator v1.5.0](https://github.com/mroboff/vm-curator/blob/main/CHANGELOG.md) — see that changelog for feature history.
+
+## v1.5.0-1
+
+- Merged upstream `v1.4.0` → `v1.5.0` (virtual disk resize, per-VM `qemu.log` launch logging, SMB shared folders, multi-GPU VFIO binding overhaul, NixOS fixes, and the bug-fix batch in between) into this fork's `main`.
+- Runtime dependency changed from `qemu-system-x86-core` to `qemu-system-x86`. Fedora splits QEMU so the `-core` package ships no display or audio modules; upstream fixed this for the RPM too (#98), and the Change Display screen now names the package to install when QEMU has no windowed backend.
+- Added Fedora weak dependencies: `Recommends` for `edk2-ovmf`, `swtpm`, `passt`, `samba`, `virt-viewer`, `polkit`, `kmod`, and `hwdata`; `Suggests` for `dnsmasq` and the non-x86 QEMU system emulators. These are optional at runtime — `dnf` installs Recommends by default, so UEFI, TPM, passt networking, and SMB shared folders work out of the box.
+- Ship `UPSTREAM-README.md` (upstream docs pinned to v1.5.0) as a package doc, alongside `README.md`.
+- Refreshed `UPSTREAM-README.md` from upstream v1.5.0 — it had been stale since v1.3.0 — with a condensed changelog and a new Storage Management feature section.
+- Refreshed `README.md`: 130+ OS profiles, disk resizing, and the new dependency behaviour.
 
 ## v1.4.0-1
 
