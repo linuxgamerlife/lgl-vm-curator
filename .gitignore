@@ -32,3 +32,9 @@ result-*
 
 # Local session notes (not for version control)
 /lgl/
+
+# AI stuff
+.claude/worktrees
+
+# direnv / nix-direnv cache
+.direnv/

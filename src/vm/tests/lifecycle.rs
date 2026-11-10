@@ -373,7 +373,7 @@ fn test_ensure_window_size_override_in_script_reports_missing_script() {
 
 #[test]
 fn test_generate_shared_folders_section_empty() {
-    let section = generate_shared_folders_section(&[], "virtio-9p-pci");
+    let section = generate_shared_folders_section(&[], "virtio-9p-pci", None);
     assert!(section.is_empty());
 }
 
@@ -382,8 +382,9 @@ fn test_generate_shared_folders_section_single() {
     let folders = vec![SharedFolder {
         host_path: "/home/user/Documents".to_string(),
         mount_tag: "host_documents".to_string(),
+        mode: ShareMode::NineP,
     }];
-    let section = generate_shared_folders_section(&folders, "virtio-9p-pci");
+    let section = generate_shared_folders_section(&folders, "virtio-9p-pci", None);
     assert!(section.contains(SHARED_FOLDERS_MARKER_START));
     assert!(section.contains(SHARED_FOLDERS_MARKER_END));
     assert!(section.contains("SHARED_FOLDERS_ARGS=("));
@@ -399,13 +400,15 @@ fn test_generate_shared_folders_section_multiple() {
         SharedFolder {
             host_path: "/home/user/Documents".to_string(),
             mount_tag: "host_documents".to_string(),
+            mode: ShareMode::NineP,
         },
         SharedFolder {
             host_path: "/home/user/Downloads".to_string(),
             mount_tag: "host_downloads".to_string(),
+            mode: ShareMode::NineP,
         },
     ];
-    let section = generate_shared_folders_section(&folders, "virtio-9p-pci");
+    let section = generate_shared_folders_section(&folders, "virtio-9p-pci", None);
     assert!(section.contains("fsdev0"));
     assert!(section.contains("fsdev1"));
     assert!(section.contains("mount_tag=host_documents"));
@@ -417,8 +420,9 @@ fn test_generate_shared_folders_section_arm() {
     let folders = vec![SharedFolder {
         host_path: "/tmp/share".to_string(),
         mount_tag: "host_share".to_string(),
+        mode: ShareMode::NineP,
     }];
-    let section = generate_shared_folders_section(&folders, "virtio-9p-device");
+    let section = generate_shared_folders_section(&folders, "virtio-9p-device", None);
     assert!(section.contains("virtio-9p-device"));
     assert!(!section.contains("virtio-9p-pci"));
 }
@@ -428,8 +432,9 @@ fn test_generate_shared_folders_section_path_with_spaces() {
     let folders = vec![SharedFolder {
         host_path: "/home/user/My Documents".to_string(),
         mount_tag: "host_my_documents".to_string(),
+        mode: ShareMode::NineP,
     }];
-    let section = generate_shared_folders_section(&folders, "virtio-9p-pci");
+    let section = generate_shared_folders_section(&folders, "virtio-9p-pci", None);
     assert!(section.contains("path=/home/user/My Documents"));
     assert!(section.contains("SHARED_FOLDERS_ARGS=("));
 }
@@ -511,8 +516,9 @@ fn test_insert_shared_folders_section_simple() {
     let folders = vec![SharedFolder {
         host_path: "/tmp".to_string(),
         mount_tag: "host_tmp".to_string(),
+        mode: ShareMode::NineP,
     }];
-    let section = generate_shared_folders_section(&folders, "virtio-9p-pci");
+    let section = generate_shared_folders_section(&folders, "virtio-9p-pci", None);
     let result = insert_shared_folders_section(content, &section);
     assert!(result.contains(SHARED_FOLDERS_MARKER_START));
     assert!(result.contains(SHARED_FOLDERS_ARGS_REF));
@@ -576,6 +582,7 @@ esac
     let folders = vec![SharedFolder {
         host_path: "/home/user/shared".to_string(),
         mount_tag: "host_shared".to_string(),
+        mode: ShareMode::NineP,
     }];
 
     save_shared_folders(&vm, &folders).unwrap();
@@ -596,13 +603,15 @@ fn test_roundtrip_shared_folders() {
         SharedFolder {
             host_path: "/home/user/Documents".to_string(),
             mount_tag: "host_documents".to_string(),
+            mode: ShareMode::NineP,
         },
         SharedFolder {
             host_path: "/home/user/My Pictures".to_string(),
             mount_tag: "host_my_pictures".to_string(),
+            mode: ShareMode::NineP,
         },
     ];
-    let section = generate_shared_folders_section(&folders, "virtio-9p-pci");
+    let section = generate_shared_folders_section(&folders, "virtio-9p-pci", None);
     let parsed = parse_shared_folders_section(&section);
     assert_eq!(parsed.len(), 2);
     assert_eq!(parsed[0].host_path, "/home/user/Documents");
@@ -616,8 +625,9 @@ fn test_shared_folders_array_survives_shell_expansion() {
     let folders = vec![SharedFolder {
         host_path: "/home/user/O'Brien Documents".to_string(),
         mount_tag: "host_obrien_documents".to_string(),
+        mode: ShareMode::NineP,
     }];
-    let section = generate_shared_folders_section(&folders, "virtio-9p-pci");
+    let section = generate_shared_folders_section(&folders, "virtio-9p-pci", None);
     let script = format!(
         "{}\nset -- qemu-system-x86_64 {}\nprintf '%s\\0' \"$@\"\n",
         section, SHARED_FOLDERS_ARGS_REF
@@ -977,4 +987,520 @@ fn test_disk_passthrough_coexists_with_usb_section() {
     let disks = load_disk_passthrough(&vm);
     assert_eq!(disks.len(), 1);
     assert_eq!(disks[0].bootindex, Some(2));
+}
+
+// ---------------------------------------------------------------------------
+// OVMF_VARS writability repair (NixOS read-only firmware templates)
+// ---------------------------------------------------------------------------
+
+#[cfg(unix)]
+fn mode_of(path: &Path) -> u32 {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::metadata(path).unwrap().permissions().mode() & 0o777
+}
+
+#[cfg(unix)]
+fn write_with_mode(path: &Path, mode: u32) {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::write(path, b"vars").unwrap();
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap();
+}
+
+#[test]
+#[cfg(unix)]
+fn test_ensure_ovmf_vars_writable_adds_owner_write_bit() {
+    let tmp = tempfile::tempdir().unwrap();
+    let vars = tmp.path().join("OVMF_VARS.fd");
+    // Exactly what `cp` from /nix/store produces.
+    write_with_mode(&vars, 0o444);
+
+    ensure_ovmf_vars_writable(tmp.path()).unwrap();
+
+    assert_eq!(mode_of(&vars), 0o644);
+}
+
+#[test]
+#[cfg(unix)]
+fn test_ensure_ovmf_vars_writable_handles_qcow2_variant() {
+    let tmp = tempfile::tempdir().unwrap();
+    let vars = tmp.path().join("OVMF_VARS.qcow2");
+    write_with_mode(&vars, 0o444);
+
+    ensure_ovmf_vars_writable(tmp.path()).unwrap();
+
+    assert_eq!(mode_of(&vars), 0o644);
+}
+
+#[test]
+#[cfg(unix)]
+fn test_ensure_ovmf_vars_writable_leaves_writable_file_alone() {
+    let tmp = tempfile::tempdir().unwrap();
+    let vars = tmp.path().join("OVMF_VARS.fd");
+    write_with_mode(&vars, 0o600);
+
+    ensure_ovmf_vars_writable(tmp.path()).unwrap();
+
+    // Only the owner-write bit is ever added; other bits are never touched.
+    assert_eq!(mode_of(&vars), 0o600);
+}
+
+#[test]
+fn test_ensure_ovmf_vars_writable_is_noop_without_vars_file() {
+    // BIOS VMs and first launches have no OVMF_VARS yet: not an error.
+    let tmp = tempfile::tempdir().unwrap();
+    ensure_ovmf_vars_writable(tmp.path()).unwrap();
+    assert!(ensure_ovmf_vars_writable(Path::new("/nonexistent/vm-curator-vm")).is_ok());
+}
+
+// ---------------------------------------------------------------------------
+// Per-VM launch log (qemu.log)
+// ---------------------------------------------------------------------------
+
+fn write_stub_launch_script(dir: &Path, body: &str) {
+    use std::os::unix::fs::PermissionsExt;
+    let path = dir.join("launch.sh");
+    std::fs::write(&path, format!("#!/usr/bin/env bash\n{body}\n")).unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+}
+
+fn launch_options(boot_mode: BootMode) -> LaunchOptions {
+    LaunchOptions {
+        boot_mode,
+        extra_args: Vec::new(),
+        usb_devices: Vec::new(),
+        window_size: None,
+    }
+}
+
+/// Poll the log until it contains `needle` (the stderr tee is asynchronous).
+fn wait_for_log(path: &Path, needle: &str) -> String {
+    for _ in 0..60 {
+        if let Ok(content) = std::fs::read_to_string(path) {
+            if content.contains(needle) {
+                return content;
+            }
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    panic!(
+        "{needle:?} never appeared in {}:\n{}",
+        path.display(),
+        std::fs::read_to_string(path).unwrap_or_default()
+    );
+}
+
+#[test]
+fn launch_writes_per_vm_log_with_header_and_both_streams() {
+    let dir = tempfile::tempdir().unwrap();
+    // Keep running past the 800ms startup check so this counts as a success.
+    write_stub_launch_script(
+        dir.path(),
+        "echo 'Booting stub...'\necho 'qemu-system-x86_64: warning: virgl fake warning' >&2\nsleep 2",
+    );
+    let vm = test_vm(dir.path());
+
+    let result = launch_vm_with_error_check(&vm, &launch_options(BootMode::Install));
+    assert!(result.success, "{:?}", result.error);
+
+    let log = qemu_log_path(dir.path());
+    let content = wait_for_log(&log, "virgl fake warning");
+    assert!(content.starts_with("# vm-curator launch "), "{content}");
+    assert!(
+        content.contains(&format!(
+            "# command: bash {} --install",
+            dir.path().join("launch.sh").display()
+        )),
+        "{content}"
+    );
+    assert!(
+        content.contains("Booting stub..."),
+        "stdout missing: {content}"
+    );
+    assert!(
+        content.contains("qemu-system-x86_64: warning: virgl fake warning"),
+        "stderr missing: {content}"
+    );
+    // A VM that ran fine still has its warnings on disk — the whole point.
+    assert!(!content.contains("Full log:"));
+}
+
+#[test]
+fn launch_failure_reports_error_and_points_at_log() {
+    let dir = tempfile::tempdir().unwrap();
+    write_stub_launch_script(
+        dir.path(),
+        "echo \"qemu-system-x86_64: Could not open '/x/OVMF_VARS.fd': Permission denied\" >&2\nexit 1",
+    );
+    let vm = test_vm(dir.path());
+
+    let result = launch_vm_with_error_check(&vm, &launch_options(BootMode::Normal));
+    assert!(!result.success);
+    let error = result.error.unwrap();
+    assert!(error.contains("Permission denied"), "{error}");
+    assert!(
+        error.contains(&format!(
+            "Full log: {}",
+            qemu_log_path(dir.path()).display()
+        )),
+        "{error}"
+    );
+
+    let content = wait_for_log(&qemu_log_path(dir.path()), "Permission denied");
+    assert!(content.contains("Permission denied"));
+}
+
+#[test]
+fn launch_log_keeps_capturing_after_launcher_returns() {
+    // `vm-curator launch` (CLI) returns within a second while QEMU runs on.
+    // Output written after that must still land in the log — this is the
+    // difference between redirecting the child's fds and piping through us.
+    let dir = tempfile::tempdir().unwrap();
+    write_stub_launch_script(
+        dir.path(),
+        "echo EARLY >&2\nsleep 1.5\necho 'LATE: after launcher returned' >&2",
+    );
+    let vm = test_vm(dir.path());
+
+    let result = launch_vm_with_error_check(&vm, &launch_options(BootMode::Normal));
+    assert!(result.success, "{:?}", result.error);
+    let early = std::fs::read_to_string(qemu_log_path(dir.path())).unwrap();
+    assert!(
+        early.contains("EARLY") && !early.contains("LATE"),
+        "{early}"
+    );
+
+    let content = wait_for_log(&qemu_log_path(dir.path()), "LATE: after launcher returned");
+    assert!(content.contains("EARLY"));
+}
+
+#[test]
+fn launch_rotates_previous_log() {
+    let dir = tempfile::tempdir().unwrap();
+    let vm = test_vm(dir.path());
+
+    write_stub_launch_script(dir.path(), "echo FIRST-RUN >&2\nexit 1");
+    launch_vm_with_error_check(&vm, &launch_options(BootMode::Normal));
+    wait_for_log(&qemu_log_path(dir.path()), "FIRST-RUN");
+
+    write_stub_launch_script(dir.path(), "echo SECOND-RUN >&2\nexit 1");
+    launch_vm_with_error_check(&vm, &launch_options(BootMode::Normal));
+    let current = wait_for_log(&qemu_log_path(dir.path()), "SECOND-RUN");
+    let previous = std::fs::read_to_string(dir.path().join(QEMU_LOG_PREVIOUS)).unwrap();
+
+    assert!(current.contains("SECOND-RUN") && !current.contains("FIRST-RUN"));
+    assert!(previous.contains("FIRST-RUN") && !previous.contains("SECOND-RUN"));
+}
+
+// --- SMB-mode shared folders (#101) ---------------------------------------
+
+#[test]
+fn test_generate_shared_folders_section_smb_uses_set_on_user_netdev() {
+    let folders = vec![SharedFolder::smb("/home/user/Public")];
+    let section = generate_shared_folders_section(&folders, "virtio-9p-pci", Some("net0"));
+    assert!(section.contains("    -set\n    'netdev.net0.smb=/home/user/Public'\n"));
+    assert!(!section.contains("-fsdev"));
+    assert!(!section.contains("-device"));
+}
+
+#[test]
+fn test_generate_shared_folders_section_smb_path_with_spaces_and_commas() {
+    // `-set` values are not comma-parsed by QEMU, so the path only needs
+    // shell quoting — commas must survive verbatim.
+    let folders = vec![SharedFolder::smb("/home/user/Docs, Pics & More")];
+    let section = generate_shared_folders_section(&folders, "virtio-9p-pci", Some("net1"));
+    assert!(section.contains("'netdev.net1.smb=/home/user/Docs, Pics & More'"));
+}
+
+#[test]
+fn test_generate_shared_folders_section_mixed_modes_keep_fsdev_indices() {
+    let folders = vec![
+        SharedFolder::nine_p("/srv/a", "host_a"),
+        SharedFolder::smb("/srv/smb"),
+        SharedFolder::nine_p("/srv/b", "host_b"),
+    ];
+    let section = generate_shared_folders_section(&folders, "virtio-9p-pci", Some("net0"));
+    assert!(section.contains("id=fsdev0,path=/srv/a"));
+    assert!(section.contains("netdev.net0.smb=/srv/smb"));
+    // Index follows the folder's position, not the count of 9p folders.
+    assert!(section.contains("id=fsdev2,path=/srv/b"));
+}
+
+#[test]
+fn test_roundtrip_shared_folders_with_smb() {
+    let folders = vec![
+        SharedFolder::nine_p("/home/user/Documents", "host_documents"),
+        SharedFolder::smb("/home/user/My Share"),
+    ];
+    let section = generate_shared_folders_section(&folders, "virtio-9p-pci", Some("net0"));
+    let parsed = parse_shared_folders_section(&section);
+    assert_eq!(parsed.len(), 2);
+    assert_eq!(parsed[0].mode, ShareMode::NineP);
+    assert_eq!(parsed[0].mount_tag, "host_documents");
+    assert_eq!(parsed[1].mode, ShareMode::Smb);
+    assert_eq!(parsed[1].host_path, "/home/user/My Share");
+    // A derived tag so switching the folder back to 9p works without input.
+    assert_eq!(parsed[1].mount_tag, "host_my_share");
+}
+
+#[test]
+fn test_parse_shared_folders_section_ignores_malformed_set() {
+    let content = format!(
+        "{}\nSHARED_FOLDERS_ARGS=(\n    -set\n    netdev.net0.restrict=on\n)\n{}\n",
+        SHARED_FOLDERS_MARKER_START, SHARED_FOLDERS_MARKER_END
+    );
+    assert!(parse_shared_folders_section(&content).is_empty());
+}
+
+#[test]
+fn test_find_user_netdev_id_prefers_default_boot_branch() {
+    let script = r#"#!/bin/bash
+case "$1" in
+    --install)
+        qemu-system-x86_64 \
+        -netdev user,id=inst0 \
+        -device virtio-net-pci,netdev=inst0
+        ;;
+    "")
+        qemu-system-x86_64 \
+        -netdev user,id=net0,hostfwd=tcp::2222-:22 \
+        -device virtio-net-pci,netdev=net0
+        ;;
+esac
+"#;
+    assert_eq!(find_user_netdev_id(script).as_deref(), Some("net0"));
+}
+
+#[test]
+fn test_find_user_netdev_id_none_for_bridge_or_passt() {
+    let bridge = "qemu-system-x86_64 \\\n    -netdev bridge,id=net0,br=vmc-lab \\\n    -device virtio-net-pci,netdev=net0\n";
+    assert_eq!(find_user_netdev_id(bridge), None);
+    let passt = "qemu-system-x86_64 \\\n    -netdev stream,id=net0,server=off,addr.type=unix,addr.path=/tmp/p.sock\n";
+    assert_eq!(find_user_netdev_id(passt), None);
+    let commented = "# -netdev user,id=net0\nqemu-system-x86_64 -m 1024\n";
+    assert_eq!(find_user_netdev_id(commented), None);
+}
+
+#[test]
+fn test_find_user_netdev_id_quoted_spec() {
+    let script = "qemu-system-x86_64 -netdev \"user,id=mynet,hostfwd=tcp::8080-:80\" -device e1000,netdev=mynet\n";
+    assert_eq!(find_user_netdev_id(script).as_deref(), Some("mynet"));
+}
+
+#[test]
+fn test_save_shared_folders_smb_attaches_to_user_netdev() {
+    let dir = tempfile::tempdir().unwrap();
+    let vm = test_vm(dir.path());
+    std::fs::write(
+        &vm.launch_script,
+        "#!/bin/bash\nqemu-system-x86_64 \\\n    -m 2048 \\\n    -netdev user,id=net0 \\\n    -device virtio-net-pci,netdev=net0\n",
+    )
+    .unwrap();
+
+    save_shared_folders(&vm, &[SharedFolder::smb("/home/user/Public")]).unwrap();
+
+    let script = std::fs::read_to_string(&vm.launch_script).unwrap();
+    assert!(script.contains("netdev.net0.smb=/home/user/Public"));
+    // The managed block is expanded at the end of the command, after -netdev,
+    // which is what lets `-set` find the netdev.
+    let netdev_pos = script.find("-netdev user,id=net0").unwrap();
+    let ref_pos = script.find(SHARED_FOLDERS_ARGS_REF).unwrap();
+    assert!(ref_pos > netdev_pos);
+    assert_eq!(
+        load_shared_folders(&vm),
+        vec![SharedFolder::smb("/home/user/Public")]
+    );
+}
+
+#[test]
+fn test_save_shared_folders_smb_rejected_without_user_netdev() {
+    let dir = tempfile::tempdir().unwrap();
+    let vm = test_vm(dir.path());
+    std::fs::write(
+        &vm.launch_script,
+        "#!/bin/bash\nqemu-system-x86_64 \\\n    -netdev bridge,id=net0,br=virbr0 \\\n    -device virtio-net-pci,netdev=net0\n",
+    )
+    .unwrap();
+
+    let err = save_shared_folders(&vm, &[SharedFolder::smb("/srv/share")]).unwrap_err();
+    assert!(err.to_string().contains("user-mode networking"), "{err}");
+    // Nothing written.
+    let script = std::fs::read_to_string(&vm.launch_script).unwrap();
+    assert!(!script.contains(SHARED_FOLDERS_MARKER_START));
+}
+
+#[test]
+fn test_save_shared_folders_rejects_two_smb_folders() {
+    let dir = tempfile::tempdir().unwrap();
+    let vm = test_vm(dir.path());
+    std::fs::write(
+        &vm.launch_script,
+        "#!/bin/bash\nqemu-system-x86_64 -netdev user,id=net0 -device e1000,netdev=net0\n",
+    )
+    .unwrap();
+
+    let err = save_shared_folders(
+        &vm,
+        &[SharedFolder::smb("/srv/a"), SharedFolder::smb("/srv/b")],
+    )
+    .unwrap_err();
+    assert!(err.to_string().contains("only one folder"), "{err}");
+}
+
+#[test]
+fn test_smb_shared_folder_survives_shell_expansion() {
+    let folders = vec![SharedFolder::smb("/home/user/O'Brien, Docs")];
+    let section = generate_shared_folders_section(&folders, "virtio-9p-pci", Some("net0"));
+    let script = format!(
+        "{}\nset -- qemu-system-x86_64 {}\nprintf '%s\\0' \"$@\"\n",
+        section, SHARED_FOLDERS_ARGS_REF
+    );
+    let output = std::process::Command::new("bash")
+        .arg("-c")
+        .arg(script)
+        .output()
+        .expect("bash should run");
+    assert!(output.status.success());
+    let args: Vec<String> = output
+        .stdout
+        .split(|b| *b == 0)
+        .filter(|s| !s.is_empty())
+        .map(|s| String::from_utf8_lossy(s).to_string())
+        .collect();
+    assert_eq!(
+        args,
+        vec![
+            "qemu-system-x86_64".to_string(),
+            "-set".to_string(),
+            "netdev.net0.smb=/home/user/O'Brien, Docs".to_string(),
+        ]
+    );
+}
+
+#[test]
+fn test_generate_mount_tag() {
+    assert_eq!(
+        generate_mount_tag("/home/user/My Documents"),
+        "host_my_documents"
+    );
+    assert_eq!(
+        generate_mount_tag("/srv/Share-2024.v1"),
+        "host_share_2024_v1"
+    );
+    assert_eq!(generate_mount_tag("/"), "host_shared");
+}
+
+// --- `-name "$VM_NAME"` self-heal for older scripts (#96) ---------------
+
+const OLD_SCRIPT_NO_NAME: &str = r#"#!/bin/bash
+# Old VM Launch Script
+VM_DIR="$(dirname "$(readlink -f "$0")")"
+DISK="$VM_DIR/disk.qcow2"
+
+case "$1" in
+    --install)
+        qemu-system-x86_64 \
+        -enable-kvm \
+        -m 2048M \
+        -cdrom "$ISO"
+        ;;
+    "")
+        echo "Booting..."
+        qemu-system-x86_64 \
+        -enable-kvm \
+        -m 2048M
+        ;;
+esac
+"#;
+
+#[test]
+fn test_add_vm_name_patches_every_qemu_block() {
+    let patched = add_vm_name_to_script(OLD_SCRIPT_NO_NAME).expect("should patch");
+    // VM_NAME defined right after VM_DIR
+    assert!(patched.contains(
+        "VM_DIR=\"$(dirname \"$(readlink -f \"$0\")\")\"\nVM_NAME=\"$(basename \"$VM_DIR\")\"\n"
+    ));
+    // -name inserted as the first arg of both invocations, indentation kept
+    assert_eq!(
+        patched.matches("        -name \"$VM_NAME\" \\\n").count(),
+        2
+    );
+    assert!(patched.contains(
+        "        qemu-system-x86_64 \\\n        -name \"$VM_NAME\" \\\n        -enable-kvm \\\n"
+    ));
+    // Nothing else changed
+    assert!(patched.contains("        -cdrom \"$ISO\"\n        ;;"));
+}
+
+#[test]
+fn test_add_vm_name_is_idempotent_and_respects_existing_name() {
+    let patched = add_vm_name_to_script(OLD_SCRIPT_NO_NAME).unwrap();
+    assert!(
+        add_vm_name_to_script(&patched).is_none(),
+        "second pass is a no-op"
+    );
+
+    let user_named =
+        OLD_SCRIPT_NO_NAME.replace("-enable-kvm \\\n", "-name \"My Box\" \\\n-enable-kvm \\\n");
+    assert!(
+        add_vm_name_to_script(&user_named).is_none(),
+        "user's own -name is kept"
+    );
+}
+
+#[test]
+fn test_add_vm_name_skips_scripts_it_cannot_anchor() {
+    // No VM_DIR line to hang VM_NAME on: leave it alone rather than emit an
+    // unbound variable.
+    let hand_written = "#!/bin/bash\nqemu-system-x86_64 \\\n    -m 1024M\n";
+    assert!(add_vm_name_to_script(hand_written).is_none());
+    // Single-line invocation (no continuation): nothing to splice into.
+    let one_liner = "#!/bin/bash\nVM_DIR=\"$(dirname \"$0\")\"\nqemu-system-x86_64 -m 1024M\n";
+    assert!(add_vm_name_to_script(one_liner).is_none());
+    // A commented-out -name doesn't count as present.
+    let commented = OLD_SCRIPT_NO_NAME.replace("# Old VM Launch Script", "# -name \"x\" was here");
+    assert!(add_vm_name_to_script(&commented).is_some());
+}
+
+#[test]
+fn test_add_vm_name_result_is_valid_bash_and_expands_to_dir_name() {
+    let dir = tempfile::tempdir().unwrap();
+    let vm_dir = dir.path().join("tiny11pro");
+    std::fs::create_dir(&vm_dir).unwrap();
+    let script_path = vm_dir.join("launch.sh");
+    // Patch first, then swap the qemu invocations for a printf so we can
+    // observe the args the script would pass.
+    let patched = add_vm_name_to_script(OLD_SCRIPT_NO_NAME).unwrap();
+    let observable = patched.replace("qemu-system-x86_64 \\", "printf '%s\\n' \\");
+    std::fs::write(&script_path, observable).unwrap();
+
+    let syntax = std::process::Command::new("bash")
+        .args(["-n", script_path.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(
+        syntax.status.success(),
+        "{}",
+        String::from_utf8_lossy(&syntax.stderr)
+    );
+
+    let run = std::process::Command::new("bash")
+        .arg(&script_path)
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&run.stdout);
+    assert!(stdout.contains("-name\ntiny11pro\n"), "stdout: {stdout}");
+}
+
+#[test]
+fn test_ensure_name_in_script_writes_file() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("launch.sh"), OLD_SCRIPT_NO_NAME).unwrap();
+    ensure_name_in_script(dir.path()).unwrap();
+    let after = std::fs::read_to_string(dir.path().join("launch.sh")).unwrap();
+    assert!(after.contains("-name \"$VM_NAME\""));
+    ensure_name_in_script(dir.path()).unwrap();
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("launch.sh")).unwrap(),
+        after
+    );
 }

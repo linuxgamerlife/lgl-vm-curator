@@ -1,10 +1,9 @@
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::fmt;
-use std::io::{BufRead, BufReader};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
 
@@ -148,6 +147,107 @@ fn check_bridge_exists(vm: &DiscoveredVm) -> Result<(), String> {
     }
 }
 
+/// Per-VM log of the last launch: the exact command, then everything
+/// `launch.sh` and QEMU wrote to stdout/stderr, streamed live.
+///
+/// QEMU's stderr used to be captured only in memory and shown only if the
+/// process died within the first second — warnings from a VM that *ran* (GL,
+/// virgl, audio, USB) were unrecoverable. The log lives next to the VM so it
+/// is trivial to find and to attach to a bug report.
+pub const QEMU_LOG_FILE: &str = "qemu.log";
+/// The previous launch's log, kept for comparison.
+pub const QEMU_LOG_PREVIOUS: &str = "qemu.log.old";
+
+/// Path of the VM's launch log.
+pub fn qemu_log_path(vm_path: &Path) -> PathBuf {
+    vm_path.join(QEMU_LOG_FILE)
+}
+
+/// An open launch log: the file both child streams are pointed at, plus
+/// where it lives (the VM directory, or a temp-dir fallback if that failed).
+struct QemuLog {
+    file: std::fs::File,
+    path: PathBuf,
+}
+
+/// Rotate the previous log aside and open a fresh one with a launch header.
+///
+/// The child's stdout and stderr are redirected straight into this file, so
+/// logging does not depend on the launcher staying alive: `vm-curator launch`
+/// returns within a second while QEMU keeps writing for hours. If the VM
+/// directory is not writable the log falls back to the system temp dir.
+fn open_qemu_log(vm_path: &Path, invocation: &LaunchInvocation) -> std::io::Result<QemuLog> {
+    let path = qemu_log_path(vm_path);
+    let (mut file, path) = match rotate_and_create(&path, &vm_path.join(QEMU_LOG_PREVIOUS)) {
+        Ok(file) => (file, path),
+        Err(e) => {
+            log::warn!(
+                "could not open {}: {e}; logging to temp dir",
+                path.display()
+            );
+            let name = vm_path
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "vm".to_string());
+            let fallback = std::env::temp_dir().join(format!("vm-curator-{name}.log"));
+            let file = rotate_and_create(&fallback, &fallback.with_extension("log.old"))?;
+            (file, fallback)
+        }
+    };
+    writeln!(
+        file,
+        "# vm-curator launch {}",
+        chrono::Local::now().format("%Y-%m-%d %H:%M:%S %Z")
+    )?;
+    writeln!(
+        file,
+        "# command: {} {}",
+        invocation.program,
+        invocation.args.join(" ")
+    )?;
+    for (name, value) in &invocation.env {
+        if let Some(value) = value {
+            writeln!(file, "# env: {name}={value}")?;
+        }
+    }
+    writeln!(file, "# --- stdout/stderr of launch.sh and QEMU ---")?;
+    file.flush()?;
+    Ok(QemuLog { file, path })
+}
+
+fn rotate_and_create(path: &Path, previous: &Path) -> std::io::Result<std::fs::File> {
+    if path.exists() {
+        let _ = std::fs::rename(path, previous);
+    }
+    std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+}
+
+/// Point the child's stdout and stderr at the log (both handles share one
+/// append-mode file description, so lines interleave in write order).
+fn redirect_output_to_log(cmd: &mut Command, log: &QemuLog) {
+    match (log.file.try_clone(), log.file.try_clone()) {
+        (Ok(out), Ok(err)) => {
+            cmd.stdout(Stdio::from(out)).stderr(Stdio::from(err));
+        }
+        _ => {
+            cmd.stdout(Stdio::null()).stderr(Stdio::null());
+        }
+    }
+}
+
+/// The process output recorded in the log so far (header lines excluded).
+fn logged_output_lines(log: &QemuLog) -> Vec<String> {
+    std::fs::read_to_string(&log.path)
+        .unwrap_or_default()
+        .lines()
+        .filter(|l| !l.starts_with("# ") && !l.trim().is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct LaunchInvocation {
     program: String,
@@ -266,6 +366,12 @@ pub fn launch_vm_with_error_check(vm: &DiscoveredVm, options: &LaunchOptions) ->
     if let Err(e) = ensure_qmp_in_script(&vm.path) {
         log::warn!("launch_vm_with_error_check: could not patch QMP into launch.sh: {e}");
     }
+    if let Err(e) = ensure_name_in_script(&vm.path) {
+        log::warn!("launch_vm_with_error_check: could not patch -name into launch.sh: {e}");
+    }
+    if let Err(e) = ensure_ovmf_vars_writable(&vm.path) {
+        log::warn!("launch_vm_with_error_check: could not make OVMF_VARS writable: {e}");
+    }
 
     let invocation = match build_launch_invocation(vm, options) {
         Ok(invocation) => invocation,
@@ -286,12 +392,23 @@ pub fn launch_vm_with_error_check(vm: &DiscoveredVm, options: &LaunchOptions) ->
         }
     }
 
-    let mut cmd = invocation.command();
+    // Per-VM log: both child streams go straight to the file, so the log is
+    // complete no matter how soon this launcher returns.
+    let log = match open_qemu_log(&vm.path, &invocation) {
+        Ok(log) => log,
+        Err(e) => {
+            return LaunchResult {
+                success: false,
+                error: Some(format!("Failed to open launch log: {e}")),
+                vm_name,
+            };
+        }
+    };
+    let log_hint = format!("\nFull log: {}", log.path.display());
 
-    // Capture stderr to detect errors, but let stdout go to null
-    cmd.stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped());
+    let mut cmd = invocation.command();
+    cmd.stdin(Stdio::null());
+    redirect_output_to_log(&mut cmd, &log);
 
     let mut child = match cmd.spawn() {
         Ok(c) => c,
@@ -304,36 +421,6 @@ pub fn launch_vm_with_error_check(vm: &DiscoveredVm, options: &LaunchOptions) ->
         }
     };
 
-    // Take stderr handle for monitoring
-    let stderr = match child.stderr.take() {
-        Some(s) => s,
-        None => {
-            return LaunchResult {
-                success: true,
-                error: None,
-                vm_name,
-            };
-        }
-    };
-
-    // Create a channel to receive error output
-    let (tx, rx) = mpsc::channel();
-
-    // Spawn a thread to read ALL stderr output
-    thread::spawn(move || {
-        let reader = BufReader::new(stderr);
-        let mut all_lines = Vec::new();
-
-        for line in reader.lines().map_while(Result::ok) {
-            // Capture all stderr output - we'll filter later if needed
-            if !line.trim().is_empty() {
-                all_lines.push(line);
-            }
-        }
-
-        let _ = tx.send(all_lines);
-    });
-
     // Wait for QEMU to either start successfully or fail
     // QEMU typically fails fast if there's a configuration error
     thread::sleep(Duration::from_millis(800));
@@ -344,13 +431,8 @@ pub fn launch_vm_with_error_check(vm: &DiscoveredVm, options: &LaunchOptions) ->
             // Process exited - this usually means an error for QEMU
             // (successful QEMU keeps running until the VM shuts down)
 
-            // Wait a bit more for stderr to be fully captured
-            thread::sleep(Duration::from_millis(300));
-
-            // Try to get error output
-            let stderr_lines = rx
-                .recv_timeout(Duration::from_millis(500))
-                .unwrap_or_default();
+            // Everything the process wrote is already in the log file.
+            let stderr_lines = logged_output_lines(&log);
 
             // Filter for error-related lines for display
             let error_lines: Vec<&String> = stderr_lines
@@ -386,7 +468,7 @@ pub fn launch_vm_with_error_check(vm: &DiscoveredVm, options: &LaunchOptions) ->
 
             return LaunchResult {
                 success: false,
-                error: Some(error_msg),
+                error: Some(format!("{error_msg}{log_hint}")),
                 vm_name,
             };
         }
@@ -435,6 +517,12 @@ pub fn launch_vm_dbus(vm: &DiscoveredVm) -> Result<u32> {
     if let Err(e) = ensure_qmp_in_script(&vm.path) {
         log::warn!("launch_vm_dbus: could not patch QMP into launch.sh: {e}");
     }
+    if let Err(e) = ensure_name_in_script(&vm.path) {
+        log::warn!("launch_vm_dbus: could not patch -name into launch.sh: {e}");
+    }
+    if let Err(e) = ensure_ovmf_vars_writable(&vm.path) {
+        log::warn!("launch_vm_dbus: could not make OVMF_VARS writable: {e}");
+    }
 
     let script_path = vm.path.join("launch.sh");
     let content = std::fs::read_to_string(&script_path).context("Failed to read launch.sh")?;
@@ -445,29 +533,30 @@ pub fn launch_vm_dbus(vm: &DiscoveredVm) -> Result<u32> {
     use std::os::unix::fs::PermissionsExt;
     let _ = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o755));
 
-    let mut child = Command::new("bash")
-        .arg(&tmp)
-        .current_dir(&vm.path)
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .context("Failed to spawn QEMU")?;
+    let invocation = LaunchInvocation {
+        program: "bash".to_string(),
+        current_dir: vm.path.clone(),
+        args: vec![tmp.to_string_lossy().to_string()],
+        env: Vec::new(),
+    };
+    let log = open_qemu_log(&vm.path, &invocation).context("Failed to open launch log")?;
+
+    let mut cmd = invocation.command();
+    redirect_output_to_log(&mut cmd, &log);
+    let mut child = cmd.spawn().context("Failed to spawn QEMU")?;
     let pid = child.id();
 
     // Brief poll to catch immediate QEMU startup failures (missing session D-Bus,
     // bad flag, missing library) before returning Ok(pid) to the caller.
     thread::sleep(Duration::from_millis(300));
     if let Ok(Some(status)) = child.try_wait() {
-        use std::io::Read;
-        let stderr = child
-            .stderr
-            .take()
-            .map(|mut s| {
-                let mut b = String::new();
-                s.read_to_string(&mut b).ok();
-                b
-            })
-            .unwrap_or_default();
-        bail!("QEMU exited immediately ({}): {}", status, stderr.trim());
+        let output = logged_output_lines(&log).join("\n");
+        bail!(
+            "QEMU exited immediately ({}): {}\nFull log: {}",
+            status,
+            output.trim(),
+            log.path.display()
+        );
     }
     // child intentionally dropped — QEMU process continues running
 
@@ -1152,11 +1241,168 @@ const SHARED_FOLDERS_MARKER_START: &str = "# >>> Shared Folders (managed by vm-c
 const SHARED_FOLDERS_MARKER_END: &str = "# <<< Shared Folders <<<";
 const SHARED_FOLDERS_ARGS_REF: &str = "\"${SHARED_FOLDERS_ARGS[@]}\"";
 
-/// A shared folder configuration for virtio-9p host-to-guest file sharing
+/// How a shared folder is exposed to the guest.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord)]
+pub enum ShareMode {
+    /// virtio-9p filesystem device, mounted in the guest by `mount_tag`.
+    #[default]
+    NineP,
+    /// QEMU's built-in SMB server on the user-mode (SLIRP) netdev. The guest
+    /// reaches it at `\\10.0.2.4\qemu` with no driver install (#101). Needs
+    /// `smbd` (samba) on the host and a `user` network backend; QEMU exports
+    /// a single directory per netdev, so at most one folder may use this mode.
+    Smb,
+}
+
+/// UNC path at which the guest sees an SMB-mode shared folder (SLIRP's default
+/// SMB server address and QEMU's fixed share name).
+pub const SMB_GUEST_SHARE: &str = "\\\\10.0.2.4\\qemu";
+
+/// A shared folder configuration for host-to-guest file sharing
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SharedFolder {
     pub host_path: String,
+    /// 9p mount tag. Kept for SMB-mode folders too so switching modes is lossless.
     pub mount_tag: String,
+    pub mode: ShareMode,
+}
+
+impl SharedFolder {
+    /// A virtio-9p folder with an explicit mount tag.
+    pub fn nine_p(host_path: impl Into<String>, mount_tag: impl Into<String>) -> Self {
+        Self {
+            host_path: host_path.into(),
+            mount_tag: mount_tag.into(),
+            mode: ShareMode::NineP,
+        }
+    }
+
+    /// An SMB folder; the mount tag is derived from the path in case the user
+    /// later switches it to 9p.
+    pub fn smb(host_path: impl Into<String>) -> Self {
+        let host_path = host_path.into();
+        let mount_tag = generate_mount_tag(&host_path);
+        Self {
+            host_path,
+            mount_tag,
+            mode: ShareMode::Smb,
+        }
+    }
+}
+
+/// Generate a 9p mount tag from a host directory path (`/home/u/My Docs` → `host_my_docs`).
+pub fn generate_mount_tag(path: &str) -> String {
+    let folder_name = std::path::Path::new(path)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("shared");
+    let sanitized: String = folder_name
+        .to_lowercase()
+        .chars()
+        .map(|c| if c.is_alphanumeric() { c } else { '_' })
+        .collect();
+    let tag = sanitized
+        .split('_')
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>()
+        .join("_");
+    format!(
+        "host_{}",
+        if tag.is_empty() {
+            "shared".to_string()
+        } else {
+            tag
+        }
+    )
+}
+
+/// Find the id of the user-mode (SLIRP) netdev in a launch script, e.g. `net0`
+/// from `-netdev user,id=net0,hostfwd=...`. Looks at the last QEMU invocation
+/// (the default boot branch in vm-curator's generated scripts) first, then the
+/// whole script, so a `--install` branch with a different setup can't mislead it.
+pub fn find_user_netdev_id(content: &str) -> Option<String> {
+    fn scan(text: &str) -> Option<String> {
+        for line in text.lines() {
+            let trimmed = line.trim();
+            if trimmed.starts_with('#') {
+                continue;
+            }
+            let Some(pos) = trimmed.find("-netdev") else {
+                continue;
+            };
+            let after = trimmed[pos + "-netdev".len()..].trim_start();
+            // The netdev spec is the next shell word; it may be quoted.
+            let spec = after
+                .trim_start_matches(['"', '\''])
+                .split(|c: char| c.is_whitespace() || c == '"' || c == '\'' || c == '\\')
+                .next()
+                .unwrap_or("");
+            if !(spec.starts_with("user,") || spec == "user" || spec.starts_with("user ")) {
+                continue;
+            }
+            for opt in spec.split(',') {
+                if let Some(id) = opt.strip_prefix("id=") {
+                    if !id.is_empty() {
+                        return Some(id.to_string());
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    // Prefer the default boot branch: the last qemu-system-* block.
+    let lines: Vec<&str> = content.lines().collect();
+    let mut last_start = None;
+    for (i, line) in lines.iter().enumerate() {
+        let t = line.trim_start();
+        if !t.starts_with('#')
+            && (t.starts_with("qemu-system-") || t.starts_with("exec qemu-system-"))
+        {
+            last_start = Some(i);
+        }
+    }
+    if let Some(start) = last_start {
+        let mut end = start;
+        while end + 1 < lines.len() && lines[end].trim_end().ends_with('\\') {
+            end += 1;
+        }
+        if let Some(id) = scan(&lines[start..=end].join("\n")) {
+            return Some(id);
+        }
+    }
+    scan(content)
+}
+
+/// Where QEMU expects the host `smbd` binary for its built-in SMB server.
+/// Distro builds compile in `/usr/sbin/smbd`; fall back to a PATH lookup.
+pub fn smbd_available() -> bool {
+    if std::path::Path::new("/usr/sbin/smbd").exists() {
+        return true;
+    }
+    std::env::var_os("PATH")
+        .map(|paths| std::env::split_paths(&paths).any(|dir| dir.join("smbd").is_file()))
+        .unwrap_or(false)
+}
+
+/// Validate an SMB-mode folder set against the launch script before saving.
+/// Returns the user netdev id to attach the share to.
+fn validate_smb_folders(folders: &[SharedFolder], content: &str) -> Result<Option<String>> {
+    let smb_count = folders.iter().filter(|f| f.mode == ShareMode::Smb).count();
+    if smb_count == 0 {
+        return Ok(None);
+    }
+    if smb_count > 1 {
+        anyhow::bail!(
+            "QEMU's built-in SMB server exports a single directory; only one folder can use SMB mode (share a parent directory instead)"
+        );
+    }
+    match find_user_netdev_id(content) {
+        Some(id) => Ok(Some(id)),
+        None => anyhow::bail!(
+            "SMB shares need user-mode networking (the `user` backend); this VM's launch.sh has no `-netdev user` — change it in Network Settings or use 9p mode"
+        ),
+    }
 }
 
 /// Escape a string for safe use in shell scripts
@@ -1178,6 +1424,9 @@ pub fn save_shared_folders(vm: &DiscoveredVm, folders: &[SharedFolder]) -> Resul
     // Remove existing shared folders section if present
     let content = remove_shared_folders_section(&content);
 
+    // SMB folders piggyback on the user-mode netdev; make sure there is one.
+    let smb_netdev = validate_smb_folders(folders, &content)?;
+
     // Determine device name based on architecture
     let device_name = if vm.config.emulator.command().contains("aarch64")
         || vm.config.emulator.command().contains("arm")
@@ -1188,7 +1437,7 @@ pub fn save_shared_folders(vm: &DiscoveredVm, folders: &[SharedFolder]) -> Resul
     };
 
     // Generate new shared folders section
-    let section = generate_shared_folders_section(folders, device_name);
+    let section = generate_shared_folders_section(folders, device_name, smb_netdev.as_deref());
 
     // Insert into script
     let new_content = insert_shared_folders_section(&content, &section);
@@ -1253,7 +1502,19 @@ fn remove_shared_folders_arg_ref(line: &str) -> String {
     cleaned
 }
 
-fn generate_shared_folders_section(folders: &[SharedFolder], device_name: &str) -> String {
+/// Build the managed `SHARED_FOLDERS_ARGS` block.
+///
+/// 9p folders become `-fsdev`/`-device` pairs. An SMB folder becomes
+/// `-set netdev.<id>.smb=<path>`, which QEMU applies to the already-defined
+/// user netdev (`-set` runs after all `-netdev` options on the command line,
+/// which is where this block is expanded). Keeping it here rather than on the
+/// `-netdev` line itself means the network generator/parser stay untouched,
+/// and commas in the path need no escaping (unlike inline `smb=`).
+fn generate_shared_folders_section(
+    folders: &[SharedFolder],
+    device_name: &str,
+    smb_netdev: Option<&str>,
+) -> String {
     if folders.is_empty() {
         return String::new();
     }
@@ -1264,6 +1525,16 @@ fn generate_shared_folders_section(folders: &[SharedFolder], device_name: &str) 
     section.push_str("SHARED_FOLDERS_ARGS=(\n");
 
     for (i, folder) in folders.iter().enumerate() {
+        if folder.mode == ShareMode::Smb {
+            let netdev = smb_netdev.unwrap_or("net0");
+            let set_arg = format!("netdev.{}.smb={}", netdev, folder.host_path);
+            section.push_str("    -set\n");
+            section.push_str("    ");
+            section.push_str(&shell_escape(&set_arg));
+            section.push('\n');
+            continue;
+        }
+
         let id = format!("fsdev{}", i);
         let fsdev_arg = format!(
             "local,id={},path={},security_model=mapped-xattr",
@@ -1424,10 +1695,7 @@ fn parse_shared_folders_legacy_line(line: &str) -> Vec<SharedFolder> {
         let mount_tag = extract_simple_value(part, "mount_tag=");
 
         if let (Some(path), Some(tag)) = (host_path, mount_tag) {
-            folders.push(SharedFolder {
-                host_path: path,
-                mount_tag: tag,
-            });
+            folders.push(SharedFolder::nine_p(path, tag));
         }
     }
 
@@ -1447,6 +1715,15 @@ fn parse_shared_folder_tokens(tokens: &[String]) -> Vec<SharedFolder> {
     let mut i = 0;
 
     while i < tokens.len() {
+        // SMB-mode folder: `-set netdev.<id>.smb=<path>`
+        if tokens[i] == "-set" {
+            if let Some(path) = tokens.get(i + 1).and_then(|arg| parse_smb_set_arg(arg)) {
+                folders.push(SharedFolder::smb(path));
+            }
+            i += 2;
+            continue;
+        }
+
         if tokens[i] != "-fsdev" {
             i += 1;
             continue;
@@ -1470,16 +1747,24 @@ fn parse_shared_folder_tokens(tokens: &[String]) -> Vec<SharedFolder> {
         }
 
         if let (Some(path), Some(tag)) = (extract_path_value(fsdev_arg), mount_tag) {
-            folders.push(SharedFolder {
-                host_path: path,
-                mount_tag: tag,
-            });
+            folders.push(SharedFolder::nine_p(path, tag));
         }
 
         i += 2;
     }
 
     folders
+}
+
+/// Extract the shared path from a `netdev.<id>.smb=<path>` `-set` argument.
+fn parse_smb_set_arg(arg: &str) -> Option<String> {
+    let rest = arg.strip_prefix("netdev.")?;
+    let (_, value) = rest.split_once(".smb=")?;
+    if value.is_empty() {
+        None
+    } else {
+        Some(value.to_string())
+    }
 }
 
 fn parse_shell_words(line: &str) -> Vec<String> {
@@ -1986,6 +2271,34 @@ const QMP_ARG: &str = "        -qmp unix:\"$VM_DIR/qemu.sock\",server=on,wait=of
 /// Patch an existing launch.sh to include a QMP socket if not already present.
 /// Idempotent — safe to call before every launch.
 #[allow(dead_code)]
+/// Make the VM's per-VM `OVMF_VARS` copy writable if it is not.
+///
+/// `launch.sh` creates that copy with `cp`, which preserves the template's
+/// mode. When the template lives on a read-only store — NixOS's `/nix/store`
+/// is mode 0444 — the copy is read-only too and QEMU aborts with
+/// `Could not open '.../OVMF_VARS.fd': Permission denied`. Scripts generated
+/// after this fix repair the copy themselves; this repairs VMs created before
+/// it. A missing file (BIOS VM, or first launch) is not an error.
+pub fn ensure_ovmf_vars_writable(vm_path: &Path) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    for name in ["OVMF_VARS.fd", "OVMF_VARS.qcow2"] {
+        let path = vm_path.join(name);
+        let Ok(meta) = std::fs::metadata(&path) else {
+            continue;
+        };
+        if !meta.is_file() {
+            continue;
+        }
+        let mut perms = meta.permissions();
+        if perms.mode() & 0o200 == 0 {
+            perms.set_mode(perms.mode() | 0o200);
+            std::fs::set_permissions(&path, perms)
+                .with_context(|| format!("Failed to make {} writable", path.display()))?;
+        }
+    }
+    Ok(())
+}
+
 pub fn ensure_qmp_in_script(vm_path: &Path) -> Result<()> {
     let script_path = vm_path.join("launch.sh");
     let content =
@@ -2038,6 +2351,69 @@ pub fn ensure_qmp_in_script(vm_path: &Path) -> Result<()> {
 
     std::fs::write(&script_path, result).context("Failed to write patched launch.sh")?;
     Ok(())
+}
+
+/// Give every QEMU invocation in an existing launch.sh a `-name "$VM_NAME"`
+/// so the window is titled `QEMU (<vm-dir>)` (#96). Scripts generated after
+/// this change already have it; this repairs older ones at launch.
+///
+/// Idempotent and conservative: a script that already passes `-name`
+/// (ours or the user's own) is left alone, as is a hand-written script
+/// without the `VM_DIR=` line we hang the `VM_NAME` definition on.
+pub fn ensure_name_in_script(vm_path: &Path) -> Result<()> {
+    let script_path = vm_path.join("launch.sh");
+    let content = std::fs::read_to_string(&script_path)
+        .context("Failed to read launch.sh for -name patch")?;
+    if let Some(patched) = add_vm_name_to_script(&content) {
+        std::fs::write(&script_path, patched).context("Failed to write patched launch.sh")?;
+    }
+    Ok(())
+}
+
+/// Pure half of [`ensure_name_in_script`]: `None` when nothing needs changing.
+pub fn add_vm_name_to_script(content: &str) -> Option<String> {
+    let has_name = content.lines().any(|l| {
+        let t = l.trim_start();
+        !t.starts_with('#') && (t.starts_with("-name ") || t.contains(" -name "))
+    });
+    if has_name {
+        return None;
+    }
+    let vm_dir_line = content
+        .lines()
+        .position(|l| l.trim_start().starts_with("VM_DIR="))?;
+
+    let lines: Vec<&str> = content.lines().collect();
+    let mut out = String::with_capacity(content.len() + 128);
+    let mut changed = false;
+
+    for (i, line) in lines.iter().enumerate() {
+        out.push_str(line);
+        out.push('\n');
+
+        if i == vm_dir_line {
+            out.push_str("VM_NAME=\"$(basename \"$VM_DIR\")\"\n");
+            continue;
+        }
+
+        // First line of a multi-line QEMU invocation: `qemu-system-* \`
+        let t = line.trim();
+        let is_qemu_start = !t.starts_with('#')
+            && (t.starts_with("qemu-system-") || t.starts_with("exec qemu-system-"))
+            && t.ends_with('\\');
+        if is_qemu_start {
+            let indent: String = line.chars().take_while(|c| c.is_whitespace()).collect();
+            out.push_str(&indent);
+            out.push_str("-name \"$VM_NAME\" \\\n");
+            changed = true;
+        }
+    }
+
+    if changed {
+        Some(out)
+    } else {
+        None
+    }
 }
 
 /// Send a raw QMP command to a running VM's monitor socket.

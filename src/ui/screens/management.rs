@@ -1,6 +1,6 @@
 use ratatui::{
     prelude::*,
-    widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph},
+    widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap},
 };
 
 use crate::app::App;
@@ -32,6 +32,7 @@ pub enum MenuAction {
     Toggle3dAccel,
     EditNotes,
     RenameVm,
+    ResizeStorage,
     ResetVm,
     DeleteVm,
     EditRawConfig,
@@ -67,7 +68,7 @@ pub fn get_menu_items(vm: &DiscoveredVm, config: &Config) -> Vec<MenuItem> {
         },
         MenuItem {
             name: "Shared Folders",
-            description: "Share host directories with the VM (9p)",
+            description: "Share host directories with the VM (9p or SMB)",
             action: MenuAction::SharedFolders,
         },
         MenuItem {
@@ -122,6 +123,11 @@ pub fn get_menu_items(vm: &DiscoveredVm, config: &Config) -> Vec<MenuItem> {
             description: "Change the VM's display name",
             action: MenuAction::RenameVm,
         },
+        MenuItem {
+            name: "Resize Storage",
+            description: "Increase a virtual disk capacity",
+            action: MenuAction::ResizeStorage,
+        },
     ]);
 
     items.push(MenuItem {
@@ -162,6 +168,14 @@ pub fn menu_item_count(app: &App) -> usize {
         get_menu_items(vm, &app.config).len()
     } else {
         6 // Default count
+    }
+}
+
+fn menu_item_label(index: usize, name: &str) -> String {
+    if index < 9 {
+        format!("[{}] {}", index + 1, name)
+    } else {
+        format!("    {name}")
     }
 }
 
@@ -268,7 +282,7 @@ pub fn render(app: &App, frame: &mut Frame) {
             };
 
             let content = vec![
-                Line::styled(format!("[{}] {}", i + 1, item.name), style),
+                Line::styled(menu_item_label(i, item.name), style),
                 Line::styled(
                     format!("    {}", item.description),
                     Style::default().fg(Color::DarkGray),
@@ -296,8 +310,8 @@ pub fn render(app: &App, frame: &mut Frame) {
 /// Render boot options submenu
 pub fn render_boot_options(app: &App, frame: &mut Frame) {
     let area = frame.area();
-    let dialog_width = 50.min(area.width.saturating_sub(4));
-    let dialog_height = 16.min(area.height.saturating_sub(4));
+    let dialog_width = 56.min(area.width.saturating_sub(4));
+    let dialog_height = 20.min(area.height.saturating_sub(4));
 
     let dialog_area = centered_rect(dialog_width, dialog_height, area);
     frame.render_widget(Clear, dialog_area);
@@ -327,6 +341,7 @@ pub fn render_boot_options(app: &App, frame: &mut Frame) {
         .constraints([
             Constraint::Length(1), // Top padding
             Constraint::Min(1),    // Content
+            Constraint::Length(4), // Media-swap tip (#99)
         ])
         .split(h_chunks[1]);
 
@@ -371,7 +386,19 @@ pub fn render_boot_options(app: &App, frame: &mut Frame) {
 
     let list = List::new(items);
     frame.render_stateful_widget(list, v_chunks[1], &mut state);
+
+    // Multi-disk installs (DOS, early Windows) need the next floppy or CD
+    // swapped in while the VM runs; that happens in QEMU's own monitor, which
+    // the GTK display exposes as a tab (#99).
+    let tip = Paragraph::new(BOOT_OPTIONS_MEDIA_TIP)
+        .style(Style::default().fg(Color::DarkGray))
+        .wrap(Wrap { trim: true });
+    frame.render_widget(tip, v_chunks[2]);
 }
+
+/// How to swap floppy/CD images on a running VM (shown under Boot Options).
+pub const BOOT_OPTIONS_MEDIA_TIP: &str = "Need the next disk mid-install? In the QEMU window: \
+     View > compatmonitor0, then  change floppy0 <img>  or  change ide1-cd0 <iso>";
 
 /// Render display options submenu
 pub fn render_display_options(app: &App, frame: &mut Frame) {
@@ -407,15 +434,33 @@ pub fn render_display_options(app: &App, frame: &mut Frame) {
         ])
         .split(inner);
 
+    // A headless-only QEMU (e.g. Fedora's qemu-system-x86-core) offers no
+    // gtk/sdl/spice-app; say which package fixes that instead of silently
+    // listing just vnc/none (#98).
+    let gui_hint = app
+        .selected_vm()
+        .map(|vm| vm.config.emulator.command())
+        .and_then(|emulator| app.display_capabilities.get(emulator))
+        .and_then(|detected| crate::commands::qemu_system::missing_gui_backend_hint(detected));
+    let hint_rows = if gui_hint.is_some() { 4 } else { 0 };
+
     // Add top padding and help area
     let v_chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(1), // Top padding
-            Constraint::Min(1),    // Content
-            Constraint::Length(2), // Help
+            Constraint::Length(1),         // Top padding
+            Constraint::Min(1),            // Content
+            Constraint::Length(hint_rows), // Missing-GUI-backend hint
+            Constraint::Length(2),         // Help
         ])
         .split(h_chunks[1]);
+
+    if let Some(hint) = gui_hint {
+        let note = Paragraph::new(hint)
+            .style(Style::default().fg(Color::Yellow))
+            .wrap(Wrap { trim: true });
+        frame.render_widget(note, v_chunks[2]);
+    }
 
     let display_options = get_display_options(app);
 
@@ -456,7 +501,7 @@ pub fn render_display_options(app: &App, frame: &mut Frame) {
     let help = Paragraph::new("[Enter] Select  [Esc] Back")
         .style(Style::default().fg(Color::DarkGray))
         .alignment(Alignment::Center);
-    frame.render_widget(help, v_chunks[2]);
+    frame.render_widget(help, v_chunks[3]);
 }
 
 /// Extract display setting from launch script
@@ -602,4 +647,59 @@ fn centered_rect(width: u16, height: u16, area: Rect) -> Rect {
     let x = area.x + (area.width.saturating_sub(width)) / 2;
     let y = area.y + (area.height.saturating_sub(height)) / 2;
     Rect::new(x, y, width, height)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::vm::QemuConfig;
+    use std::path::PathBuf;
+
+    fn test_vm() -> DiscoveredVm {
+        DiscoveredVm {
+            id: "test-vm".to_string(),
+            path: PathBuf::from("/vms/test-vm"),
+            launch_script: PathBuf::from("/vms/test-vm/launch.sh"),
+            config: QemuConfig::default(),
+            custom_name: None,
+            os_profile: None,
+            notes: None,
+        }
+    }
+
+    #[test]
+    fn management_menu_exposes_storage_resize() {
+        let items = get_menu_items(&test_vm(), &Config::default());
+        let resize = items
+            .iter()
+            .find(|item| item.action == MenuAction::ResizeStorage)
+            .expect("resize storage menu item");
+
+        assert_eq!(resize.name, "Resize Storage");
+        assert_eq!(resize.description, "Increase a virtual disk capacity");
+    }
+
+    #[test]
+    fn menu_labels_only_advertise_supported_numeric_shortcuts() {
+        assert_eq!(menu_item_label(0, "First"), "[1] First");
+        assert_eq!(menu_item_label(8, "Ninth"), "[9] Ninth");
+        assert_eq!(menu_item_label(9, "Tenth"), "    Tenth");
+        assert_eq!(menu_item_label(13, "Fourteenth"), "    Fourteenth");
+    }
+
+    #[test]
+    fn storage_resize_does_not_advertise_an_unhandled_shortcut() {
+        let items = get_menu_items(&test_vm(), &Config::default());
+        let (index, resize) = items
+            .iter()
+            .enumerate()
+            .find(|(_, item)| item.action == MenuAction::ResizeStorage)
+            .expect("resize storage menu item");
+
+        assert!(
+            index >= 9,
+            "test requires resize to appear after shortcut 9"
+        );
+        assert_eq!(menu_item_label(index, resize.name), "    Resize Storage");
+    }
 }
